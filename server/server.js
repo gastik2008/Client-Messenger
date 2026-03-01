@@ -3,12 +3,14 @@ const http = require('http');
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
+// 🔥 КРИТИЧНО: Render назначает порт через переменную окружения
 const PORT = process.env.PORT || 5000;
+// 🔥 КРИТИЧНО: Слушаем 0.0.0.0, а не localhost!
+const HOST = '0.0.0.0';
 
-// 1. Создаём HTTP-сервер
+// Создаём HTTP-сервер
 const server = http.createServer((req, res) => {
-    // Простой ответ для проверки работоспособности
-    // Теперь https://...onrender.com вернёт JSON, а не 404
+    // Ответ для проверки работоспособности
     res.writeHead(200, { 
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*'
@@ -16,14 +18,14 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ 
         status: 'ok', 
         service: 'client-messenger',
-        websocket: 'wss://' + (process.env.RENDER_EXTERNAL_URL || 'localhost:' + PORT)
+        timestamp: new Date().toISOString()
     }));
 });
 
-// 2. Привязываем WebSocket к HTTP-серверу
+// Привязываем WebSocket к HTTP-серверу
 const wss = new WebSocket.Server({ server });
 
-// Хранилища
+// Хранилища (in-memory для бесплатного тарифа)
 const clients = new Map();
 const accounts = {};
 
@@ -87,14 +89,14 @@ function sendPrivateMessage(targetUsername, sender, text, hint) {
     return false;
 }
 
-// Обработка подключений
+// Обработка подключений WebSocket
 wss.on('connection', (ws) => {
     const clientId = Date.now() + Math.random();
     clients.set(clientId, { ws, authenticated: false, username: null });
 
     console.log(`📡 Новый клиент: ${clientId}`);
 
-    // Heartbeat для Render
+    // Heartbeat для предотвращения отключения на Render
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
@@ -165,6 +167,7 @@ wss.on('connection', (ws) => {
             }
         } catch (error) {
             console.error('Ошибка обработки:', error);
+            ws.send(JSON.stringify({ type: 'ERROR', message: 'Ошибка сервера' }));
         }
     });
 
@@ -184,7 +187,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Heartbeat интервал
+// Heartbeat интервал для Render
 setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -193,9 +196,24 @@ setInterval(() => {
     });
 }, 60000);
 
-// Запуск HTTP-сервера (не просто WebSocket!)
-server.listen(PORT, () => {
-    console.log(`🚀 Сервер запущен на порту ${PORT}`);
+// 🔥 КРИТИЧНО: server.listen(PORT, HOST) — оба параметра!
+server.listen(PORT, HOST, () => {
+    console.log(`🚀 Сервер запущен на ${HOST}:${PORT}`);
     console.log(`🌐 HTTP: http://localhost:${PORT}`);
     console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
+    console.log(`☁️  Render URL: ${process.env.RENDER_EXTERNAL_URL || 'не определён'}`);
+});
+
+// Обработка ошибок сервера
+server.on('error', (err) => {
+    console.error('❌ Ошибка сервера:', err);
+});
+
+// Graceful shutdown для Render
+process.on('SIGTERM', () => {
+    console.log('🔄 Получен SIGTERM, завершаю работу...');
+    server.close(() => {
+        console.log('✅ Сервер остановлен');
+        process.exit(0);
+    });
 });
