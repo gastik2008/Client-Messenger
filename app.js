@@ -483,3 +483,4 @@ window.addEventListener('resize', () => {
         messagesList.scrollTop = messagesList.scrollHeight;
     }
 });
+
