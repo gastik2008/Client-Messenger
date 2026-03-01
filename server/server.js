@@ -1,225 +1,208 @@
-// server/server.js
 const http = require('http');
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
-// 🔥 Railway назначает порт автоматически
 const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0'; // 🔥 Критично: не localhost!
-
-// Создаём HTTP-сервер
 const server = http.createServer((req, res) => {
-    // Health check endpoint для Railway
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'healthy', service: 'client-messenger' }));
-        return;
-    }
-    
-    // Default response
+  // Health check для деплоя
+  if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-        status: 'ok', 
-        service: 'client-messenger',
-        websocket: 'wss://' + (process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT)
-    }));
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    return;
+  }
+  // В продакшене здесь должна быть раздача статики или проксирование
+  res.writeHead(404);
+  res.end('Not found');
 });
 
-// Привязываем WebSocket к HTTP-серверу
 const wss = new WebSocket.Server({ server });
 
-// Хранилища
-const clients = new Map();
-const accounts = {};
+// === ХРАНИЛИЩЕ В ПАМЯТИ ===
+const users = new Map(); // username -> { password, ws, lastSeen }
+const sessions = new Map(); // ws -> username
+// Для личных чатов: храним историю в памяти (в реальном проекте — БД)
+const chatHistory = { general: [] }; // chatId -> [{sender, text, timestamp, privateTo, encrypted}]
 
-// Хеш пароля
-function hashPassword(password) {
-    return crypto.createHash('sha256').update(password + 'railway-salt-2024').digest('base64');
-}
+// === ОБРАБОТКА ПОДКЛЮЧЕНИЙ ===
+wss.on('connection', (ws) => {
+  console.log('🔗 Новое подключение');
 
-// Рассылка списка пользователей
-function broadcastUserList() {
-    const userList = Array.from(clients.values())
-        .filter(c => c.authenticated)
-        .map(c => c.username);
-    
-    const message = JSON.stringify({ type: 'USERLIST', users: userList });
-    
-    clients.forEach(client => {
-        if (client.authenticated && client.ws.readyState === WebSocket.OPEN) {
-            client.ws.send(message);
-        }
-    });
-}
-
-// Рассылка сообщения всем
-function broadcastMessage(sender, text, hint = null) {
-    const message = JSON.stringify({
-        type: 'MSG',
-        sender,
-        text,
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-        encrypted: !!hint,
-        hint
-    });
-
-    clients.forEach(client => {
-        if (client.authenticated && client.ws.readyState === WebSocket.OPEN) {
-            client.ws.send(message);
-        }
-    });
-}
-
-// Личное сообщение
-function sendPrivateMessage(targetUsername, sender, text, hint) {
-    const message = JSON.stringify({
-        type: 'PRIVMSG',
-        sender,
-        text,
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-        encrypted: !!hint,
-        hint
-    });
-
-    for (const [id, client] of clients) {
-        if (client.authenticated && client.username === targetUsername) {
-            if (client.ws.readyState === WebSocket.OPEN) {
-                client.ws.send(message);
-                return true;
-            }
-        }
+  ws.on('message', (raw) => {
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      ws.send(JSON.stringify({ type: 'error', message: 'Неверный формат JSON' }));
+      return;
     }
-    return false;
+
+    const username = sessions.get(ws);
+
+    switch (data.type) {
+      case 'register':
+        handleRegister(ws, data);
+        break;
+        
+      case 'login':
+        handleLogin(ws, data);
+        break;
+        
+      case 'send_message':
+        if (!username) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Сначала войдите' }));
+          return;
+        }
+        handleMessage(ws, username, data);
+        break;
+        
+      case 'get_users':
+        if (username) broadcastUserList();
+        break;
+    }
+  });
+
+  ws.on('close', () => {
+    const username = sessions.get(ws);
+    if (username) {
+      console.log(`👋 ${username} отключился`);
+      users.get(username).ws = null;
+      sessions.delete(ws);
+      broadcastUserList();
+      // Уведомление в общий чат
+      broadcast({
+        type: 'system',
+        text: `❌ ${username} покинул чат`,
+        timestamp: Date.now()
+      }, 'general');
+    }
+  });
+});
+
+// === РЕГИСТРАЦИЯ ===
+function handleRegister(ws, { username, password }) {
+  // Валидация на сервере (дублируем клиентскую)
+  const USERNAME_REGEX = /^[A-Za-z0-9]+$/;
+  if (!USERNAME_REGEX.test(username)) {
+    ws.send(JSON.stringify({ 
+      type: 'register_error', 
+      message: 'Имя: только латиница и цифры, без пробелов' 
+    }));
+    return;
+  }
+  if (username.length > 20 || password.length > 50) {
+    ws.send(JSON.stringify({ 
+      type: 'register_error', 
+      message: 'Слишком длинное имя или пароль' 
+    }));
+    return;
+  }
+  
+  if (users.has(username)) {
+    ws.send(JSON.stringify({ type: 'register_error', message: 'Пользователь уже существует' }));
+    return;
+  }
+  
+  // ⚠️ В реальном проекте: хешировать пароль (bcrypt)!
+  users.set(username, {
+    password, // demo: plain text
+    ws: null,
+    lastSeen: Date.now()
+  });
+  
+  ws.send(JSON.stringify({ type: 'register_success' }));
+  console.log(`✅ Зарегистрирован: ${username}`);
 }
 
-// Обработка WebSocket подключений
-wss.on('connection', (ws, req) => {
-    const clientId = Date.now() + Math.random();
+// === ВХОД ===
+function handleLogin(ws, { username, password }) {
+  const user = users.get(username);
+  if (!user || user.password !== password) {
+    ws.send(JSON.stringify({ type: 'login_error', message: 'Неверное имя или пароль' }));
+    return;
+  }
+  
+  // Если уже подключён — отключаем старую сессию
+  if (user.ws && user.ws.readyState === WebSocket.OPEN) {
+    user.ws.send(JSON.stringify({ type: 'kicked', message: 'Вход с другого устройства' }));
+    user.ws.close();
+  }
+  
+  user.ws = ws;
+  user.lastSeen = Date.now();
+  sessions.set(ws, username);
+  
+  ws.send(JSON.stringify({ type: 'login_success', username }));
+  broadcastUserList();
+  
+  // Уведомление в общий чат
+  broadcast({
+    type: 'system',
+    text: `✅ ${username} присоединился к чату`,
+    timestamp: Date.now()
+  }, 'general');
+  
+  console.log(`🔐 Вошёл: ${username}`);
+}
+
+// === ОТПРАВКА СООБЩЕНИЯ ===
+function handleMessage(ws, sender, { text, privateTo, encrypted, timestamp }) {
+  const message = {
+    type: 'receive_message',
+    sender,
+    text,
+    encrypted: !!encrypted,
+    timestamp: timestamp || Date.now()
+  };
+  
+  if (privateTo) {
+    // Личное сообщение
+    message.privateTo = privateTo;
+    const recipient = users.get(privateTo);
     
-    // Получаем IP клиента (для логов)
-    const ip = req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
-    console.log(`📡 Новый клиент #${clientId} с ${ip}`);
+    if (recipient && recipient.ws && recipient.ws.readyState === WebSocket.OPEN) {
+      recipient.ws.send(JSON.stringify(message));
+    }
+    // Отправляем отправителю подтверждение
+    ws.send(JSON.stringify(message));
     
-    clients.set(clientId, { ws, authenticated: false, username: null, ip });
+    // Сохраняем в историю (ключ: отсортированные имена для уникальности)
+    const chatId = [sender, privateTo].sort().join(':');
+    if (!chatHistory[chatId]) chatHistory[chatId] = [];
+    chatHistory[chatId].push(message);
+    if (chatHistory[chatId].length > 100) chatHistory[chatId].shift();
+    
+  } else {
+    // Общее сообщение
+    broadcast(message, 'general');
+    chatHistory.general.push(message);
+    if (chatHistory.general.length > 100) chatHistory.general.shift();
+  }
+}
 
-    // Heartbeat для Railway
-    ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
+// === УТИЛИТЫ ===
+function broadcast(message, chatId = null) {
+  // Если указан chatId — отправляем только в общий или личный (упрощённо: всем онлайн)
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(message));
+    }
+  });
+}
 
-    ws.on('message', (data) => {
-        try {
-            const message = JSON.parse(data.toString());
-            const client = clients.get(clientId);
-            if (!client) return;
+function broadcastUserList() {
+  const userList = Array.from(users.keys()).filter(u => users.get(u).ws?.readyState === WebSocket.OPEN);
+  broadcast({ type: 'user_list', users: userList });
+}
 
-            switch (message.type) {
-                case 'REGISTER':
-                    if (!message.username || !message.password) {
-                        ws.send(JSON.stringify({ type: 'REGISTER_FAIL', message: 'Заполните все поля' }));
-                        return;
-                    }
-                    if (message.username.length < 3) {
-                        ws.send(JSON.stringify({ type: 'REGISTER_FAIL', message: 'Имя слишком короткое' }));
-                        return;
-                    }
-                    if (accounts[message.username]) {
-                        ws.send(JSON.stringify({ type: 'REGISTER_FAIL', message: 'Пользователь уже существует' }));
-                        return;
-                    }
-                    
-                    accounts[message.username] = hashPassword(message.password);
-                    client.authenticated = true;
-                    client.username = message.username;
-                    
-                    ws.send(JSON.stringify({ type: 'REGISTER_OK', username: message.username }));
-                    broadcastMessage('Сервер', `${message.username} присоединился`);
-                    broadcastUserList();
-                    console.log(`✅ Зарегистрирован: ${message.username}`);
-                    break;
-
-                case 'LOGIN':
-                    if (!accounts[message.username] || accounts[message.username] !== hashPassword(message.password)) {
-                        ws.send(JSON.stringify({ type: 'LOGIN_FAIL', message: 'Неверный логин или пароль' }));
-                        return;
-                    }
-                    
-                    client.authenticated = true;
-                    client.username = message.username;
-                    
-                    ws.send(JSON.stringify({ type: 'LOGIN_OK', username: message.username }));
-                    broadcastMessage('Сервер', `${message.username} присоединился`);
-                    broadcastUserList();
-                    console.log(`🔓 Вошёл: ${message.username}`);
-                    break;
-
-                case 'GETUSERS':
-                    if (client.authenticated) broadcastUserList();
-                    break;
-
-                case 'MSG':
-                    if (client.authenticated && message.text) {
-                        broadcastMessage(client.username, message.text, message.hint);
-                    }
-                    break;
-
-                case 'PRIVMSG':
-                    if (client.authenticated && message.target && message.text) {
-                        const sent = sendPrivateMessage(message.target, client.username, message.text, message.hint);
-                        if (!sent) {
-                            ws.send(JSON.stringify({ type: 'ERROR', message: 'Пользователь не найден' }));
-                        }
-                    }
-                    break;
-            }
-        } catch (error) {
-            console.error('❌ Ошибка обработки:', error);
-            ws.send(JSON.stringify({ type: 'ERROR', message: 'Ошибка сервера' }));
-        }
-    });
-
-    ws.on('close', () => {
-        const client = clients.get(clientId);
-        if (client?.authenticated) {
-            console.log(`❌ Отключился: ${client.username}`);
-            broadcastMessage('Сервер', `${client.username} покинул чат`);
-            broadcastUserList();
-        }
-        clients.delete(clientId);
-    });
-
-    ws.on('error', (error) => {
-        console.error(`❌ WebSocket ошибка #${clientId}:`, error.message);
-        clients.delete(clientId);
-    });
+// === ЗАПУСК ===
+server.listen(PORT, () => {
+  console.log(`🚀 Сервер запущен на порту ${PORT}`);
 });
 
-// Heartbeat для предотвращения отключения
-setInterval(() => {
-    wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) return ws.terminate();
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 45000); // Railway timeout ~60 сек, пингуем чаще
-
-// 🔥 Запуск сервера с HOST и PORT
-server.listen(PORT, HOST, () => {
-    console.log(`🚀 Сервер запущен на ${HOST}:${PORT}`);
-    console.log(`🌐 Public URL: https://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}`);
-    console.log(`🔌 WebSocket: wss://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}`);
-    console.log(`💡 Health: https://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}/health`);
-});
-
-// Обработка ошибок
-server.on('error', (err) => {
-    console.error('❌ Ошибка HTTP-сервера:', err);
-});
-
-// Graceful shutdown для Railway
-process.on('SIGTERM', () => {
-    console.log('🔄 SIGTERM received, shutting down...');
-    server.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Завершение работы...');
+  wss.close();
+  server.close();
+  process.exit(0);
 });
