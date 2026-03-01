@@ -1,0 +1,16 @@
+# Зависимости
+node_modules/
+frontend/node_modules/
+
+# Логи и окружение
+*.log
+.env
+.env.local
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+
+# Сборки
+dist/
+build/
