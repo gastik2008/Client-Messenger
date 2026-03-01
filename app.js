@@ -365,3 +365,4 @@ function generateHint(passphrase) {
     return passphrase.substring(0, 2) + '*'.repeat(Math.max(0, passphrase.length - 2));
 
 }
+
