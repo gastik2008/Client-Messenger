@@ -8,7 +8,7 @@ let messages = [];
 // 🔹 URL WebSocket сервера (НАСТРОЙТЕ ПЕРЕД ДЕПЛОЕМ!)
 // Для локальной разработки: 'ws://localhost:5000'
 // Для продакшена: 'wss://ваш-сервер.onrender.com'
-const WS_URL = 'wss://client-messenger-server.onrender.com'; // ← ЗАМЕНИТЕ НА СВОЙ URL
+const WS_URL = 'wss://client-messenger-production.up.railway.app'; // ← ЗАМЕНИТЕ НА СВОЙ URL
 
 // 🔹 Инициализация
 document.addEventListener('DOMContentLoaded', () => {
@@ -363,4 +363,5 @@ function xorDecrypt(encryptedBase64, passphrase) {
 function generateHint(passphrase) {
     if (!passphrase || passphrase.length < 2) return '??';
     return passphrase.substring(0, 2) + '*'.repeat(Math.max(0, passphrase.length - 2));
+
 }
