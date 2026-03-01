@@ -1,13 +1,31 @@
+// server/server.js
+const http = require('http');
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
-// Порт из переменной окружения (для Render/Railway) или 5000 для локалки
 const PORT = process.env.PORT || 5000;
-const wss = new WebSocket.Server({ port: PORT });
 
-// Хранилище клиентов и аккаунтов (in-memory для бесплатных тарифов)
+// 1. Создаём HTTP-сервер
+const server = http.createServer((req, res) => {
+    // Простой ответ для проверки работоспособности
+    // Теперь https://...onrender.com вернёт JSON, а не 404
+    res.writeHead(200, { 
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+    });
+    res.end(JSON.stringify({ 
+        status: 'ok', 
+        service: 'client-messenger',
+        websocket: 'wss://' + (process.env.RENDER_EXTERNAL_URL || 'localhost:' + PORT)
+    }));
+});
+
+// 2. Привязываем WebSocket к HTTP-серверу
+const wss = new WebSocket.Server({ server });
+
+// Хранилища
 const clients = new Map();
-const accounts = {}; // { username: hashedPassword }
+const accounts = {};
 
 // Хеш пароля
 function hashPassword(password) {
@@ -58,7 +76,6 @@ function sendPrivateMessage(targetUsername, sender, text, hint) {
         hint
     });
 
-    // Найти клиента по имени
     for (const [id, client] of clients) {
         if (client.authenticated && client.username === targetUsername) {
             if (client.ws.readyState === WebSocket.OPEN) {
@@ -70,13 +87,14 @@ function sendPrivateMessage(targetUsername, sender, text, hint) {
     return false;
 }
 
+// Обработка подключений
 wss.on('connection', (ws) => {
     const clientId = Date.now() + Math.random();
     clients.set(clientId, { ws, authenticated: false, username: null });
 
     console.log(`📡 Новый клиент: ${clientId}`);
 
-    // Heartbeat для предотвращения отключения на Render
+    // Heartbeat для Render
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
@@ -84,7 +102,6 @@ wss.on('connection', (ws) => {
         try {
             const message = JSON.parse(data.toString());
             const client = clients.get(clientId);
-
             if (!client) return;
 
             switch (message.type) {
@@ -128,9 +145,7 @@ wss.on('connection', (ws) => {
                     break;
 
                 case 'GETUSERS':
-                    if (client.authenticated) {
-                        broadcastUserList();
-                    }
+                    if (client.authenticated) broadcastUserList();
                     break;
 
                 case 'MSG':
@@ -147,13 +162,9 @@ wss.on('connection', (ws) => {
                         }
                     }
                     break;
-
-                default:
-                    console.log('Неизвестный тип сообщения:', message.type);
             }
         } catch (error) {
             console.error('Ошибка обработки:', error);
-            ws.send(JSON.stringify({ type: 'ERROR', message: 'Ошибка сервера' }));
         }
     });
 
@@ -173,7 +184,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Heartbeat интервал для Render (предотвращает отключение)
+// Heartbeat интервал
 setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -182,5 +193,9 @@ setInterval(() => {
     });
 }, 60000);
 
-console.log(`🚀 Сервер запущен на порту ${PORT}`);
-console.log(`🌐 WebSocket: ${process.env.RENDER_EXTERNAL_URL ? 'wss://' + process.env.RENDER_EXTERNAL_URL : `ws://localhost:${PORT}`}`);
+// Запуск HTTP-сервера (не просто WebSocket!)
+server.listen(PORT, () => {
+    console.log(`🚀 Сервер запущен на порту ${PORT}`);
+    console.log(`🌐 HTTP: http://localhost:${PORT}`);
+    console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
+});
