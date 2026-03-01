@@ -1,486 +1,376 @@
-// 🔹 Глобальные переменные
-let socket = null;
+// === КОНФИГУРАЦИЯ ===
+const WS_URL = 'wss://client-messenger-production.up.railway.app'; // Для локального: 'ws://localhost:3000'
+const USERNAME_REGEX = /^[A-Za-z0-9]+$/;
+const MAX_USERNAME_LEN = 20;
+
+// === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+let socket;
 let currentUser = null;
-let selectedUser = null;
+let currentChat = 'general'; // 'general' или username собеседника
 let users = [];
+let encryptMode = false;
 
-// 🔹 ⚠️ URL WebSocket сервера — НАСТРОЙТЕ ПЕРЕД ЗАПУСКОМ!
-// Railway: wss://xxx.up.railway.app
-// Render:  wss://xxx.onrender.com
-// Локально: ws://localhost:5000
-const WS_URL = 'wss://client-messenger-production.up.railway.app';
-
-// 🔹 Инициализация при загрузке страницы
+// === ИНИЦИАЛИЗАЦИЯ ===
 document.addEventListener('DOMContentLoaded', () => {
-    initTabs();
-    initLogin();
-    initChat();
+  // Проверка сохранённой сессии
+  const savedUser = localStorage.getItem('messenger_user');
+  if (savedUser) {
+    currentUser = JSON.parse(savedUser);
+    connectWebSocket();
+  }
 });
 
-// ============================================================================
-// 🔹 Вкладки входа / регистрации
-// ============================================================================
-function initTabs() {
-    const tabBtns = document.querySelectorAll('.tab-btn');
-    const loginTab = document.getElementById('loginTab');
-    const registerTab = document.getElementById('registerTab');
+function connectWebSocket() {
+  socket = new WebSocket(WS_URL);
 
-    tabBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            // Переключаем активную кнопку
-            tabBtns.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-
-            // Переключаем контент вкладок
-            if (btn.dataset.tab === 'login') {
-                loginTab.classList.add('active');
-                registerTab.classList.remove('active');
-            } else {
-                loginTab.classList.remove('active');
-                registerTab.classList.add('active');
-            }
-        });
-    });
-}
-
-// ============================================================================
-// 🔹 Логин и регистрация
-// ============================================================================
-function initLogin() {
-    document.getElementById('loginBtn').addEventListener('click', handleLogin);
-    document.getElementById('registerBtn').addEventListener('click', handleRegister);
-}
-
-function showStatus(message, isError = true) {
-    const statusEl = document.getElementById('loginStatus');
-    statusEl.textContent = message;
-    statusEl.style.color = isError ? 'var(--error)' : 'var(--success)';
-    // Очищаем сообщение через 5 секунд
-    setTimeout(() => { statusEl.textContent = ''; }, 5000);
-}
-
-function handleLogin() {
-    const username = document.getElementById('loginUsername').value.trim();
-    const password = document.getElementById('loginPassword').value;
-
-    if (!username || !password) {
-        showStatus('Введите имя пользователя и пароль');
-        return;
+  socket.onopen = () => {
+    console.log('✅ Подключено к серверу');
+    if (currentUser) {
+      socket.send(JSON.stringify({ type: 'login', username: currentUser.username }));
+      loadChatsFromStorage();
+      showChatWindow();
     }
+  };
 
-    connectToServer({ type: 'LOGIN', username, password });
+  socket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    handleMessage(data);
+  };
+
+  socket.onclose = () => {
+    console.log('❌ Соединение закрыто');
+    setTimeout(connectWebSocket, 3000); // Авто-переподключение
+  };
+
+  socket.onerror = (err) => console.error('WebSocket error:', err);
 }
 
-function handleRegister() {
-    const username = document.getElementById('regUsername').value.trim();
-    const password = document.getElementById('regPassword').value;
-    const confirm = document.getElementById('regConfirmPassword').value;
+// === ОБРАБОТКА СООБЩЕНИЙ С СЕРВЕРА ===
+function handleMessage(data) {
+  switch (data.type) {
+    case 'login_success':
+      currentUser = { username: data.username };
+      localStorage.setItem('messenger_user', JSON.stringify(currentUser));
+      loadChatsFromStorage();
+      showChatWindow();
+      break;
 
-    if (password.length < 4) {
-        showStatus('Пароль должен содержать минимум 4 символа');
-        return;
-    }
+    case 'login_error':
+    case 'register_error':
+      document.getElementById('authError').textContent = data.message;
+      break;
 
-    if (password !== confirm) {
-        showStatus('Пароли не совпадают');
-        return;
-    }
+    case 'register_success':
+      document.getElementById('authError').textContent = '✅ Регистрация успешна! Войдите.';
+      document.getElementById('authError').style.color = 'var(--success)';
+      break;
 
-    connectToServer({ type: 'REGISTER', username, password });
+    case 'user_list':
+      users = data.users.filter(u => u !== currentUser.username);
+      renderUserList();
+      // Уведомление о новых пользователях (сравнение с предыдущим списком)
+      if (window.prevUsers) {
+        const newUsers = users.filter(u => !window.prevUsers.includes(u));
+        newUsers.forEach(u => addSystemMessage(`🎉 ${u} присоединился к чату`));
+      }
+      window.prevUsers = [...users];
+      break;
+
+    case 'receive_message':
+      // Определяем, в какой чат пришло сообщение
+      const chatId = data.privateTo || data.privateFrom || 'general';
+      const isForMe = !data.privateTo || data.privateTo === currentUser.username || data.privateFrom === currentChat;
+      
+      if (chatId === currentChat && isForMe) {
+        renderMessage(data);
+        saveMessageToStorage(chatId, data);
+      } else if (chatId !== 'general' && isForMe) {
+        // Сообщение в личном чате, который не активен — показываем бейдж (упрощённо: уведомление)
+        addSystemMessage(`📩 Новое сообщение от ${data.privateFrom || data.sender}`);
+      }
+      break;
+
+    case 'system':
+      if (currentChat === 'general') {
+        addSystemMessage(data.text);
+      }
+      break;
+  }
 }
 
-function connectToServer(authMessage) {
-    try {
-        // Закрываем старое соединение, если есть
-        if (socket) socket.close();
-
-        socket = new WebSocket(WS_URL);
-
-        socket.onopen = () => {
-            console.log('✅ WebSocket connected');
-            socket.send(JSON.stringify(authMessage));
-        };
-
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                handleServerMessage(data);
-            } catch (e) {
-                console.error('❌ Ошибка парсинга сообщения:', e);
-            }
-        };
-
-        socket.onerror = (error) => {
-            console.error('❌ WebSocket error:', error);
-            showStatus('Ошибка подключения к серверу');
-        };
-
-        socket.onclose = (event) => {
-            console.log('🔌 WebSocket closed:', event.code, event.reason);
-            if (currentUser) {
-                updateStatus('disconnected');
-            }
-        };
-
-    } catch (error) {
-        console.error('❌ Ошибка создания WebSocket:', error);
-        showStatus('Ошибка: ' + error.message);
-    }
+// === АВТОРИЗАЦИЯ ===
+function validateUsername(username) {
+  if (!username || username.length === 0) return 'Введите имя';
+  if (username.length > MAX_USERNAME_LEN) return `Макс. ${MAX_USERNAME_LEN} символов`;
+  if (!USERNAME_REGEX.test(username)) return 'Только латиница и цифры, без пробелов';
+  return null;
 }
 
-// ============================================================================
-// 🔹 Обработка сообщений от сервера
-// ============================================================================
-function handleServerMessage(data) {
-    switch (data.type) {
-        case 'LOGIN_OK':
-        case 'REGISTER_OK':
-            currentUser = data.username;
-            document.getElementById('loginWindow').classList.add('hidden');
-            document.getElementById('chatWindow').classList.remove('hidden');
-            document.getElementById('currentUserLabel').textContent = currentUser;
-            updateStatus('connected');
-            // Запрашиваем список пользователей после входа
-            sendToServer({ type: 'GETUSERS' });
-            break;
-
-        case 'LOGIN_FAIL':
-        case 'REGISTER_FAIL':
-            showStatus(data.message);
-            if (socket) socket.close();
-            break;
-
-        case 'USERLIST':
-            // Сохраняем пользователей с локальным статусом закрепления
-            users = data.users.map(name => ({ 
-                name, 
-                isPinned: users.find(u => u.name === name)?.isPinned || false 
-            }));
-            // Сортировка: закреплённые сверху
-            users.sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0));
-            renderUsers();
-            break;
-
-        case 'MSG':
-        case 'PRIVMSG':
-            addMessage(data);
-            break;
-
-        case 'ERROR':
-            showStatus(data.message);
-            break;
-
-        default:
-            console.log('📨 Неизвестный тип сообщения:', data.type);
-    }
+function login() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const error = validateUsername(username);
+  
+  if (error) {
+    document.getElementById('authError').textContent = error;
+    document.getElementById('authError').style.color = 'var(--error)';
+    return;
+  }
+  
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    connectWebSocket();
+    setTimeout(() => socket.send(JSON.stringify({ type: 'login', username, password })), 500);
+  } else {
+    socket.send(JSON.stringify({ type: 'login', username, password }));
+  }
 }
 
-function sendToServer(message) {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(message));
-        return true;
-    }
-    console.warn('⚠️ WebSocket не готов к отправке');
-    return false;
+function register() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const error = validateUsername(username);
+  
+  if (error) {
+    document.getElementById('authError').textContent = error;
+    document.getElementById('authError').style.color = 'var(--error)';;
+    return;
+  }
+  
+  socket.send(JSON.stringify({ type: 'register', username, password }));
 }
 
-// ============================================================================
-// 🔹 Чат: инициализация и управление
-// ============================================================================
-function initChat() {
-    // Отправка сообщения по кнопке
-    document.getElementById('sendBtn').addEventListener('click', sendMessage);
-    
-    // Отправка по Enter (без Shift)
-    document.getElementById('messageBox').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    // Показать/скрыть поле ключа шифрования
-    document.getElementById('encryptCheckBox').addEventListener('change', (e) => {
-        const keyBox = document.getElementById('encryptKeyBox');
-        keyBox.classList.toggle('hidden', !e.target.checked);
-        if (!e.target.checked) keyBox.value = '';
-    });
-
-    // Расшифровка сообщения
-    document.getElementById('decryptBtn').addEventListener('click', decryptMessage);
-    
-    // Поиск пользователей
-    document.getElementById('searchBox').addEventListener('input', searchUsers);
+// === ИНТЕРФЕЙС ===
+function showChatWindow() {
+  document.getElementById('loginWindow').classList.add('hidden');
+  document.getElementById('chatWindow').classList.remove('hidden');
+  // Переключаемся на общий чат по умолчанию
+  switchToGeneral();
 }
 
-function updateStatus(status) {
-    const indicator = document.getElementById('statusIndicator');
-    indicator.className = 'status-indicator ' + status;
+function renderUserList() {
+  const list = document.getElementById('userList');
+  list.innerHTML = '';
+  
+  users.forEach(username => {
+    const item = document.createElement('div');
+    item.className = `user-item ${currentChat === username ? 'active' : ''}`;
+    item.innerHTML = `<span>👤 ${username}</span><span class="private-badge">●</span>`;
+    item.onclick = () => switchToPrivate(username);
+    list.appendChild(item);
+  });
 }
 
-// ============================================================================
-// 🔹 Список пользователей
-// ============================================================================
-function renderUsers() {
-    const list = document.getElementById('usersList');
-    list.innerHTML = '';
-
-    users.forEach(userObj => {
-        // Не показываем текущего пользователя в списке
-        if (userObj.name === currentUser) return;
-
-        const item = document.createElement('div');
-        item.className = 'user-item' + (selectedUser === userObj.name ? ' selected' : '');
-        item.dataset.username = userObj.name;
-        
-        item.innerHTML = `
-            <span class="status">🟢</span>
-            <span class="name">${escapeHtml(userObj.name)}</span>
-            <button class="pin-btn ${userObj.isPinned ? 'pinned' : ''}" title="Закрепить">📌</button>
-        `;
-
-        // Клик по имени — выбор пользователя для личного чата
-        item.querySelector('.name').addEventListener('click', () => selectUser(userObj.name));
-        
-        // Клик по кнопке закрепления
-        item.querySelector('.pin-btn').addEventListener('click', (e) => {
-            e.stopPropagation();
-            togglePin(userObj.name);
-        });
-
-        list.appendChild(item);
-    });
+function switchToGeneral() {
+  currentChat = 'general';
+  document.getElementById('chatHeader').textContent = '💬 Общий чат';
+  document.getElementById('userList').querySelectorAll('.user-item').forEach(el => el.classList.remove('active'));
+  loadChatMessages('general');
 }
 
-function selectUser(username) {
-    selectedUser = username;
-    document.getElementById('chatTitle').textContent = `💬 ${username}`;
-    
-    // Обновляем визуальное выделение
-    document.querySelectorAll('.user-item').forEach(item => {
-        item.classList.toggle('selected', item.dataset.username === username);
-    });
-    
-    // Очищаем список сообщений при переключении чата
-    document.getElementById('messagesList').innerHTML = '';
+function switchToPrivate(username) {
+  currentChat = username;
+  document.getElementById('chatHeader').innerHTML = `💬 Личный чат с <strong>@${username}</strong>`;
+  document.getElementById('userList').querySelectorAll('.user-item').forEach(el => {
+    el.classList.toggle('active', el.textContent.includes(username));
+  });
+  loadChatMessages(username);
 }
 
-function togglePin(username) {
-    const userObj = users.find(u => u.name === username);
-    if (userObj) {
-        userObj.isPinned = !userObj.isPinned;
-        // Пересортировываем: закреплённые сверху
-        users.sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0));
-        renderUsers();
-    }
+// === ОТОБРАЖЕНИЕ СООБЩЕНИЙ ===
+function renderMessage(msg) {
+  const container = document.getElementById('messages');
+  const div = document.createElement('div');
+  
+  const isOwn = msg.sender === currentUser.username;
+  const isSystem = msg.type === 'system';
+  
+  div.className = `message ${isSystem ? 'system' : isOwn ? 'own' : 'other'}`;
+  if (msg.encrypted) div.classList.add('encrypted');
+  
+  if (!isSystem) {
+    const sender = msg.privateFrom || msg.sender;
+    div.innerHTML = `<span class="sender">${sender}${msg.encrypted ? ' 🔐' : ''}</span>${escapeHtml(msg.text)}`;
+  } else {
+    div.textContent = msg.text;
+  }
+  
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
 }
 
-function searchUsers() {
-    const query = document.getElementById('searchBox').value.toLowerCase().trim();
-    const items = document.querySelectorAll('.user-item');
-
-    items.forEach(item => {
-        const name = item.querySelector('.name').textContent.toLowerCase();
-        item.style.display = name.includes(query) ? 'flex' : 'none';
-    });
+function addSystemMessage(text) {
+  renderMessage({ type: 'system', text });
 }
 
-// ============================================================================
-// 🔹 Отправка сообщений
-// ============================================================================
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// === ОТПРАВКА СООБЩЕНИЙ ===
 function sendMessage() {
-    const messageBox = document.getElementById('messageBox');
-    const text = messageBox.value.trim();
-
-    if (!text) return;
-
-    const encrypt = document.getElementById('encryptCheckBox').checked;
-    const key = document.getElementById('encryptKeyBox').value.trim();
-    const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-
-    // Валидация ключа шифрования
-    if (encrypt && !key) {
-        alert('⚠️ Введите ключ шифрования');
-        return;
+  const input = document.getElementById('messageInput');
+  const text = input.value.trim();
+  if (!text) return;
+  
+  let messageText = text;
+  let isEncrypted = false;
+  
+  // Применяем шифрование если включено и указан ключ
+  if (encryptMode) {
+    const key = document.getElementById('encryptKey').value.trim();
+    if (key && USERNAME_REGEX.test(key)) {
+      messageText = xorEncrypt(text, key);
+      isEncrypted = true;
     }
-
-    let messageText = text;
-    let hint = '';
-
-    // Шифрование если нужно
-    if (encrypt) {
-        messageText = xorEncrypt(text, key);
-        hint = generateHint(key);
-    }
-
-    const message = {
-        type: selectedUser ? 'PRIVMSG' : 'MSG',
-        target: selectedUser || 'ALL',
-        sender: currentUser,
-        text: messageText,
-        time: time,
-        encrypted: encrypt,
-        hint: hint
-    };
-
-    // Отправляем на сервер
-    if (sendToServer(message)) {
-        // Добавляем в интерфейс сразу (оптимистичное обновление)
-        addMessage(message, true);
-        
-        // Очищаем поля ввода
-        messageBox.value = '';
-        if (encrypt) {
-            document.getElementById('encryptCheckBox').checked = false;
-            document.getElementById('encryptKeyBox').classList.add('hidden');
-        }
-    } else {
-        showStatus('❌ Не удалось отправить сообщение');
-    }
+  }
+  
+  const payload = {
+    type: 'send_message',
+    text: messageText,
+    encrypted: isEncrypted,
+    timestamp: Date.now()
+  };
+  
+  // Личное сообщение
+  if (currentChat !== 'general') {
+    payload.privateTo = currentChat;
+  }
+  
+  socket.send(JSON.stringify(payload));
+  
+  // Отображаем у себя сразу
+  renderMessage({
+    sender: currentUser.username,
+    text: messageText,
+    encrypted: isEncrypted,
+    privateTo: payload.privateTo
+  });
+  
+  // Сохраняем в localStorage
+  saveMessageToStorage(currentChat, {
+    sender: currentUser.username,
+    text: messageText,
+    encrypted: isEncrypted,
+    timestamp: payload.timestamp,
+    privateTo: payload.privateTo
+  });
+  
+  input.value = '';
+  // Не скрываем encryptPanel — пусть пользователь сам решает
 }
 
-// ============================================================================
-// 🔹 Отображение сообщений
-// ============================================================================
-function addMessage(data, isOwn = false) {
-    const list = document.getElementById('messagesList');
-    const message = document.createElement('div');
-    
-    const isCurrentUser = data.sender === currentUser || isOwn;
-    message.className = `message ${isCurrentUser ? 'own' : 'other'}`;
-
-    // Формируем отображаемый текст
-    const displayText = data.encrypted 
-        ? `🔒 Зашифровано (подсказка: ${escapeHtml(data.hint || '???')})` 
-        : escapeHtml(data.text);
-
-    message.innerHTML = `
-        ${!isCurrentUser ? `<div class="sender">${escapeHtml(data.sender)}</div>` : ''}
-        <div class="text">${displayText}</div>
-        <div class="meta">
-            <span class="time">${data.time}</span>
-            ${isCurrentUser ? '<span class="checks" title="Доставлено">✓✓</span>' : ''}
-        </div>
-    `;
-
-    // Сохраняем данные для расшифровки
-    if (data.encrypted) {
-        message.dataset.encrypted = 'true';
-        message.dataset.text = data.text;
-        message.dataset.hint = data.hint;
-        
-        // Клик по зашифрованному сообщению — показать панель расшифровки
-        message.style.cursor = 'pointer';
-        message.title = '🔓 Нажмите для расшифровки';
-        message.addEventListener('click', () => {
-            const decryptPanel = document.getElementById('decryptPanel');
-            decryptPanel.classList.remove('hidden');
-            decryptPanel.dataset.messageIndex = Array.from(list.children).indexOf(message);
-            document.getElementById('decryptKeyBox').focus();
-        });
-    }
-
-    list.appendChild(message);
-    
-    // Автопрокрутка вниз
-    list.scrollTop = list.scrollHeight;
+function handleKeyPress(e) {
+  if (e.key === 'Enter') sendMessage();
 }
 
-// ============================================================================
-// 🔹 Расшифровка сообщений
-// ============================================================================
-function decryptMessage() {
-    const decryptPanel = document.getElementById('decryptPanel');
-    const key = document.getElementById('decryptKeyBox').value.trim();
-    const messagesList = document.getElementById('messagesList');
-    const messageIndex = decryptPanel.dataset.messageIndex;
-    
-    if (!key) {
-        alert('⚠️ Введите ключ расшифровки');
-        return;
-    }
-
-    const messageEl = messagesList.children[messageIndex];
-    
-    if (messageEl && messageEl.dataset.encrypted === 'true') {
-        try {
-            const encryptedText = messageEl.dataset.text;
-            const decrypted = xorDecrypt(encryptedText, key);
-            
-            // Обновляем текст сообщения
-            messageEl.querySelector('.text').textContent = decrypted;
-            messageEl.dataset.encrypted = 'false';
-            messageEl.style.cursor = 'default';
-            messageEl.title = '';
-            
-            // Скрываем панель и очищаем поле
-            decryptPanel.classList.add('hidden');
-            document.getElementById('decryptKeyBox').value = '';
-            
-        } catch (e) {
-            console.error('❌ Ошибка расшифровки:', e);
-            alert('❌ Неверный ключ или повреждённые данные');
-        }
-    }
+// === ШИФРОВАНИЕ (XOR + base64) ===
+function toggleEncrypt() {
+  const panel = document.getElementById('encryptPanel');
+  encryptMode = !encryptMode;
+  panel.classList.toggle('hidden', !encryptMode);
+  if (encryptMode) {
+    document.getElementById('encryptKey').focus();
+  }
 }
 
-// ============================================================================
-// 🔹 Шифрование XOR (простое, для демонстрации)
-// ============================================================================
 function xorEncrypt(text, passphrase) {
-    if (!text || !passphrase) return text;
-    
-    let result = '';
-    for (let i = 0; i < text.length; i++) {
-        const charCode = text.charCodeAt(i) ^ passphrase.charCodeAt(i % passphrase.length);
-        result += String.fromCharCode(charCode);
-    }
-    // Кодируем в base64 для безопасной передачи
-    return btoa(encodeURIComponent(result));
+  if (!passphrase) return text;
+  let result = '';
+  for (let i = 0; i < text.length; i++) {
+    result += String.fromCharCode(
+      text.charCodeAt(i) ^ passphrase.charCodeAt(i % passphrase.length)
+    );
+  }
+  return btoa(result); // base64 для безопасной передачи
 }
 
-function xorDecrypt(encryptedBase64, passphrase) {
-    if (!encryptedBase64 || !passphrase) return encryptedBase64;
-    
-    // Декодируем из base64
-    const xored = decodeURIComponent(atob(encryptedBase64));
-    
+function xorDecrypt(text, passphrase) {
+  if (!passphrase) return text;
+  try {
+    const decoded = atob(text);
     let result = '';
-    for (let i = 0; i < xored.length; i++) {
-        const charCode = xored.charCodeAt(i) ^ passphrase.charCodeAt(i % passphrase.length);
-        result += String.fromCharCode(charCode);
+    for (let i = 0; i < decoded.length; i++) {
+      result += String.fromCharCode(
+        decoded.charCodeAt(i) ^ passphrase.charCodeAt(i % passphrase.length)
+      );
     }
     return result;
+  } catch {
+    return '[Ошибка расшифровки]';
+  }
 }
 
-function generateHint(passphrase) {
-    if (!passphrase || passphrase.length < 2) return '??';
-    return passphrase.substring(0, 2) + '*'.repeat(Math.max(0, passphrase.length - 2));
-}
+// === LOCALSTORAGE ДЛЯ ЧАТОВ ===
+const CHAT_STORAGE_KEY = 'messenger_chats_v1';
 
-// ============================================================================
-// 🔹 Утилиты
-// ============================================================================
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-// Закрытие панели расшифровки по клику вне её
-document.addEventListener('click', (e) => {
-    const decryptPanel = document.getElementById('decryptPanel');
-    if (decryptPanel && !decryptPanel.contains(e.target) && !e.target.closest('.message')) {
-        decryptPanel.classList.add('hidden');
+function saveMessageToStorage(chatId, msg) {
+  try {
+    const chats = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || '{}');
+    if (!chats[chatId]) chats[chatId] = [];
+    
+    chats[chatId].push({
+      ...msg,
+      id: Date.now() + Math.random()
+    });
+    
+    // Ограничиваем историю (последние 100 сообщений на чат)
+    if (chats[chatId].length > 100) {
+      chats[chatId] = chats[chatId].slice(-100);
     }
-});
+    
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chats));
+  } catch (e) {
+    console.warn('Не удалось сохранить чат:', e);
+  }
+}
 
-// Обработка изменения размера окна (адаптивность)
-window.addEventListener('resize', () => {
-    const messagesList = document.getElementById('messagesList');
-    if (messagesList) {
-        messagesList.scrollTop = messagesList.scrollHeight;
+function loadChatMessages(chatId) {
+  const container = document.getElementById('messages');
+  container.innerHTML = '';
+  
+  try {
+    const chats = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || '{}');
+    const messages = chats[chatId] || [];
+    
+    if (chatId === 'general' && messages.length === 0) {
+      addSystemMessage('👋 Добро пожаловать в общий чат!');
     }
-});
+    
+    messages.forEach(msg => {
+      // Если сообщение зашифровано и это не наше — пробуем расшифровать (если ключ в сессии)
+      let displayText = msg.text;
+      if (msg.encrypted && msg.sender !== currentUser.username) {
+        const savedKey = sessionStorage.getItem(`encrypt_key_${chatId}`);
+        if (savedKey) {
+          displayText = xorDecrypt(msg.text, savedKey) + ' 🔓';
+        } else {
+          displayText = '[Зашифрованное сообщение]';
+        }
+      }
+      
+      renderMessage({ ...msg, text: displayText });
+    });
+  } catch (e) {
+    console.warn('Не удалось загрузить чат:', e);
+    if (chatId === 'general') {
+      addSystemMessage('👋 Добро пожаловать в общий чат!');
+    }
+  }
+}
 
+function loadChatsFromStorage() {
+  // Просто предзагружаем общий чат, остальные — по клику
+  loadChatMessages('general');
+}
+
+// === ВЫХОД ===
+function logout() {
+  localStorage.removeItem('messenger_user');
+  if (socket) socket.close();
+  location.reload();
+}
+
+// Глобальная функция для доступа из HTML
+window.logout = logout;
