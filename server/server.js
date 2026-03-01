@@ -3,35 +3,38 @@ const http = require('http');
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
-// 🔥 КРИТИЧНО: Render назначает порт через переменную окружения
-const PORT = process.env.PORT || 5000;
-// 🔥 КРИТИЧНО: Слушаем 0.0.0.0, а не localhost!
-const HOST = '0.0.0.0';
+// 🔥 Railway назначает порт автоматически
+const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0'; // 🔥 Критично: не localhost!
 
 // Создаём HTTP-сервер
 const server = http.createServer((req, res) => {
-    // Ответ для проверки работоспособности
-    res.writeHead(200, { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-    });
+    // Health check endpoint для Railway
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'healthy', service: 'client-messenger' }));
+        return;
+    }
+    
+    // Default response
+    res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ 
         status: 'ok', 
         service: 'client-messenger',
-        timestamp: new Date().toISOString()
+        websocket: 'wss://' + (process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT)
     }));
 });
 
 // Привязываем WebSocket к HTTP-серверу
 const wss = new WebSocket.Server({ server });
 
-// Хранилища (in-memory для бесплатного тарифа)
+// Хранилища
 const clients = new Map();
 const accounts = {};
 
 // Хеш пароля
 function hashPassword(password) {
-    return crypto.createHash('sha256').update(password + 'your-salt-here').digest('base64');
+    return crypto.createHash('sha256').update(password + 'railway-salt-2024').digest('base64');
 }
 
 // Рассылка списка пользователей
@@ -89,14 +92,17 @@ function sendPrivateMessage(targetUsername, sender, text, hint) {
     return false;
 }
 
-// Обработка подключений WebSocket
-wss.on('connection', (ws) => {
+// Обработка WebSocket подключений
+wss.on('connection', (ws, req) => {
     const clientId = Date.now() + Math.random();
-    clients.set(clientId, { ws, authenticated: false, username: null });
+    
+    // Получаем IP клиента (для логов)
+    const ip = req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    console.log(`📡 Новый клиент #${clientId} с ${ip}`);
+    
+    clients.set(clientId, { ws, authenticated: false, username: null, ip });
 
-    console.log(`📡 Новый клиент: ${clientId}`);
-
-    // Heartbeat для предотвращения отключения на Render
+    // Heartbeat для Railway
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
 
@@ -166,7 +172,7 @@ wss.on('connection', (ws) => {
                     break;
             }
         } catch (error) {
-            console.error('Ошибка обработки:', error);
+            console.error('❌ Ошибка обработки:', error);
             ws.send(JSON.stringify({ type: 'ERROR', message: 'Ошибка сервера' }));
         }
     });
@@ -182,38 +188,38 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('error', (error) => {
-        console.error('WebSocket ошибка:', error);
+        console.error(`❌ WebSocket ошибка #${clientId}:`, error.message);
         clients.delete(clientId);
     });
 });
 
-// Heartbeat интервал для Render
+// Heartbeat для предотвращения отключения
 setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
         ws.isAlive = false;
         ws.ping();
     });
-}, 60000);
+}, 45000); // Railway timeout ~60 сек, пингуем чаще
 
-// 🔥 КРИТИЧНО: server.listen(PORT, HOST) — оба параметра!
+// 🔥 Запуск сервера с HOST и PORT
 server.listen(PORT, HOST, () => {
     console.log(`🚀 Сервер запущен на ${HOST}:${PORT}`);
-    console.log(`🌐 HTTP: http://localhost:${PORT}`);
-    console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
-    console.log(`☁️  Render URL: ${process.env.RENDER_EXTERNAL_URL || 'не определён'}`);
+    console.log(`🌐 Public URL: https://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}`);
+    console.log(`🔌 WebSocket: wss://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}`);
+    console.log(`💡 Health: https://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}/health`);
 });
 
-// Обработка ошибок сервера
+// Обработка ошибок
 server.on('error', (err) => {
-    console.error('❌ Ошибка сервера:', err);
+    console.error('❌ Ошибка HTTP-сервера:', err);
 });
 
-// Graceful shutdown для Render
+// Graceful shutdown для Railway
 process.on('SIGTERM', () => {
-    console.log('🔄 Получен SIGTERM, завершаю работу...');
+    console.log('🔄 SIGTERM received, shutting down...');
     server.close(() => {
-        console.log('✅ Сервер остановлен');
+        console.log('✅ Server closed');
         process.exit(0);
     });
 });
