@@ -1,0 +1,19 @@
+{
+  "name": "client-messenger-server",
+  "version": "1.0.0",
+  "description": "WebSocket сервер для мессенджера Client",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "keywords": ["websocket", "chat", "messenger"],
+  "author": "",
+  "license": "MIT"
+}

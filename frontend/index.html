@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client - Web Messenger</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 🔹 Окно авторизации -->
+    <div id="loginWindow" class="window">
+        <div class="login-container">
+            <h1 class="logo">CLIENT</h1>
+            
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="login">Вход</button>
+                <button class="tab-btn" data-tab="register">Регистрация</button>
+            </div>
+
+            <!-- Вкладка ВХОД -->
+            <div id="loginTab" class="tab-content active">
+                <div class="form-group">
+                    <label>Имя пользователя</label>
+                    <input type="text" id="loginUsername" placeholder="Введите имя">
+                </div>
+                <div class="form-group">
+                    <label>Пароль</label>
+                    <input type="password" id="loginPassword" placeholder="Введите пароль">
+                </div>
+                <button id="loginBtn" class="btn-primary">Войти</button>
+            </div>
+
+            <!-- Вкладка РЕГИСТРАЦИЯ -->
+            <div id="registerTab" class="tab-content">
+                <div class="form-group">
+                    <label>Имя пользователя</label>
+                    <input type="text" id="regUsername" placeholder="Введите имя">
+                </div>
+                <div class="form-group">
+                    <label>Пароль (мин. 4 символа)</label>
+                    <input type="password" id="regPassword" placeholder="Введите пароль">
+                </div>
+                <div class="form-group">
+                    <label>Подтверждение пароля</label>
+                    <input type="password" id="regConfirmPassword" placeholder="Подтвердите пароль">
+                </div>
+                <button id="registerBtn" class="btn-primary">Зарегистрироваться</button>
+            </div>
+
+            <div id="loginStatus" class="status-message"></div>
+        </div>
+    </div>
+
+    <!-- 🔹 Основное окно чата -->
+    <div id="chatWindow" class="window hidden">
+        <div class="chat-container">
+            <!-- Левая панель: Пользователи -->
+            <div class="sidebar">
+                <div class="search-box">
+                    <input type="text" id="searchBox" placeholder="🔍 Поиск...">
+                </div>
+                
+                <div class="users-list" id="usersList">
+                    <!-- Пользователи будут добавлены через JS -->
+                </div>
+
+                <!-- Имя текущего пользователя (ВНИЗУ СЛЕВА) -->
+                <div class="current-user">
+                    <span class="user-icon">👤</span>
+                    <span id="currentUserLabel">Пользователь</span>
+                </div>
+            </div>
+
+            <!-- Правая панель: Чат -->
+            <div class="chat-main">
+                <!-- Заголовок чата -->
+                <div class="chat-header">
+                    <div class="status-indicator" id="statusIndicator"></div>
+                    <h2 id="chatTitle">💬 Общий чат</h2>
+                    <span id="typingIndicator" class="typing-indicator">печатает...</span>
+                </div>
+
+                <!-- Панель ввода (СВЕРХУ) -->
+                <div class="input-panel">
+                    <textarea id="messageBox" placeholder="Введите сообщение..." rows="2"></textarea>
+                    
+                    <div class="input-controls">
+                        <input type="text" id="encryptKeyBox" placeholder="Ключ шифрования..." class="hidden">
+                        
+                        <div class="controls-right">
+                            <label class="encrypt-toggle" title="Шифровать">
+                                <input type="checkbox" id="encryptCheckBox"> 🔐
+                            </label>
+                            <button id="sendBtn" class="send-btn">➤</button>
+                        </div>
+                    </div>
+
+                    <!-- Панель расшифровки -->
+                    <div id="decryptPanel" class="decrypt-panel hidden">
+                        <input type="text" id="decryptKeyBox" placeholder="Фраза для расшифровки...">
+                        <button id="decryptBtn" class="btn-success">🔓 Расшифровать</button>
+                    </div>
+                </div>
+
+                <!-- Список сообщений (СНИЗУ) -->
+                <div class="messages-list" id="messagesList">
+                    <!-- Сообщения будут добавлены через JS -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
